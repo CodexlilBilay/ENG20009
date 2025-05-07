@@ -1,0 +1,26 @@
+void setup() {
+  // Initialize I2C sensors
+  Wire.begin();
+  initBME680();
+  initBH1750();
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), handleSensorTrigger, RISING);
+}
+
+void handleSensorTrigger() {
+  String output = bundleSensorData();
+  Serial1.println(output); // emulate SDI-12 "aD0!"
+}
+
+String bundleSensorData() {
+  float temp = readTemp();     // Calibrated value
+  float hum = readHumidity();  // Calibrated value
+  float press = readPressure();
+  float gas = readGas();
+  float light = readLight();
+
+  String packet = "0+" + String(temp, 2) + "+" + String(hum, 2) + "+" + 
+                        String(press, 2) + "+" + String(gas, 2) + "+" + 
+                        String(light, 2) + "\r\n";
+
+  return packet;
+}
