@@ -1,0 +1,166 @@
+#include <Arduino.h>
+#include <avr/pgmspace.h>
+
+// ─── font8x8_basic (ASCII 32–127) ─────────────────────────────────────────────
+// each glyph is 8 bytes, one byte per row, LSB=left pixel. 96 glyphs total.
+static const uint8_t font8x8_basic[96][8] PROGMEM = {
+  {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // ' '
+  {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00}, // '!'
+  {0x36,0x36,0x24,0x00,0x00,0x00,0x00,0x00}, // '"'
+  {0x36,0x36,0x7F,0x36,0x7F,0x36,0x36,0x00}, // '#'
+  {0x0C,0x3E,0x03,0x1E,0x30,0x1F,0x0C,0x00}, // '$'
+  {0x00,0x63,0x33,0x18,0x0C,0x66,0x63,0x00}, // '%'
+  {0x1C,0x36,0x1C,0x6E,0x3B,0x33,0x6E,0x00}, // '&'
+  {0x0C,0x0C,0x18,0x00,0x00,0x00,0x00,0x00}, // '''
+  {0x06,0x0C,0x18,0x18,0x18,0x0C,0x06,0x00}, // '('
+  {0x18,0x0C,0x06,0x06,0x06,0x0C,0x18,0x00}, // ')'
+  {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00}, // '*'
+  {0x00,0x0C,0x0C,0x3F,0x0C,0x0C,0x00,0x00}, // '+'
+  {0x00,0x00,0x00,0x00,0x0C,0x0C,0x18,0x00}, // ','
+  {0x00,0x00,0x00,0x3F,0x00,0x00,0x00,0x00}, // '-'
+  {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x00}, // '.'
+  {0x03,0x03,0x06,0x0C,0x18,0x30,0x60,0x00}, // '/'
+  {0x3E,0x63,0x73,0x7B,0x6F,0x67,0x3E,0x00}, // '0'
+  {0x0C,0x1C,0x0C,0x0C,0x0C,0x0C,0x3F,0x00}, // '1'
+  {0x3E,0x63,0x03,0x1E,0x30,0x63,0x7F,0x00}, // '2'
+  {0x3E,0x63,0x03,0x1E,0x03,0x63,0x3E,0x00}, // '3'
+  {0x06,0x0E,0x1E,0x36,0x7F,0x06,0x06,0x00}, // '4'
+  {0x7F,0x60,0x7E,0x03,0x03,0x63,0x3E,0x00}, // '5'
+  {0x1E,0x30,0x60,0x7E,0x63,0x63,0x3E,0x00}, // '6'
+  {0x7F,0x63,0x06,0x0C,0x18,0x18,0x18,0x00}, // '7'
+  {0x3E,0x63,0x63,0x3E,0x63,0x63,0x3E,0x00}, // '8'
+  {0x3E,0x63,0x63,0x3F,0x03,0x06,0x3C,0x00}, // '9'
+  {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x00}, // ':'
+  {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x18}, // ';'
+  {0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00}, // '<'
+  {0x00,0x00,0x3F,0x00,0x00,0x3F,0x00,0x00}, // '='
+  {0x18,0x0C,0x06,0x03,0x06,0x0C,0x18,0x00}, // '>'
+  {0x3E,0x63,0x03,0x1E,0x0C,0x00,0x0C,0x00}, // '?'
+  { /* '@' glyph */ 0x3E,0x63,0x7B,0x7B,0x7B,0x03,0x3E,0x00},
+  // ... continue with all uppercase, lowercase, punctuation up to ASCII 127 ...
+  // This table must have exactly 96 entries total.
+};
+
+// ─── pin-out ────────────────────────────────────────────────────────────────  
+const uint8_t colPins[8] = { A0, A1, A2, A3, A4, A5,  4,  5 };
+const uint8_t rowPins[8] = { 13, 12, 11, 10,  9,  8,  7,  6 };
+const uint8_t BTN_PIN    =  2;  // pushbutton to GND
+
+// ─── scrolling parameters ─────────────────────────────────────────────────  
+String   message       = "";
+volatile bool    dirLR       = true;                 // true = left→right
+enum { SLOW=200, MED=100, FAST=50 };
+volatile uint16_t speedMs     = MED;
+
+// ─── button debounce & mode change ────────────────────────────────────────  
+volatile unsigned long btnDownTime = 0;
+volatile bool         btnLastState = HIGH;
+volatile bool         btnHandled   = false;
+
+// ISR: detect short vs long press on BTN_PIN
+void buttonISR() {
+  bool pressed = (digitalRead(BTN_PIN) == LOW);
+  unsigned long now = millis();
+
+  if (pressed && btnLastState == HIGH) {
+    // just pressed
+    btnDownTime = now;
+    btnHandled  = false;
+  }
+  else if (!pressed && btnLastState == LOW) {
+    // just released
+    if (!btnHandled) {
+      unsigned long dur = now - btnDownTime;
+      if (dur < 500) {
+        // short press: toggle direction
+        dirLR = !dirLR;
+      } else {
+        // long press: cycle speed
+        if      (speedMs == SLOW) speedMs = MED;
+        else if (speedMs == MED ) speedMs = FAST;
+        else                       speedMs = SLOW;
+      }
+      btnHandled = true;
+    }
+  }
+  btnLastState = pressed;
+}
+
+// ─── build-and-display-one-8×8-frame ─────────────────────────────────────  
+// scrollOffset is in “virtual” pixels; each char = 8px wide
+int scrollOffset = 0;
+int totalWidth   = 0;
+
+void drawFrame() {
+  // frame buffer
+  uint8_t fb[8][8] = {};
+
+  // for each on‐screen column
+  for (int x = 0; x < 8; x++) {
+    int srcX = scrollOffset + x - 8; // allow 8px of blank at start
+    if (srcX >= 0 && srcX < totalWidth) {
+      int ch    = srcX / 8;   // which character in the message
+      int bitcol = srcX % 8;  // which column of that glyph
+      for (int row = 0; row < 8; row++) {
+        uint8_t glyph = pgm_read_byte(&font8x8_basic[ch][bitcol]);
+        fb[row][x]    = (glyph >> row) & 1;
+      }
+    }
+  }
+
+  // multiplex to the physical matrix
+  for (uint8_t r = 0; r < 8; r++) {
+    digitalWrite(rowPins[r], LOW);
+    for (uint8_t c = 0; c < 8; c++) {
+      digitalWrite(colPins[c], fb[r][c] ? HIGH : LOW);
+    }
+    delayMicroseconds(800);
+    digitalWrite(rowPins[r], HIGH);
+  }
+}
+
+void setup() {
+  // set up matrix pins
+  for (uint8_t i = 0; i < 8; i++) {
+    pinMode(colPins[i], OUTPUT);
+    pinMode(rowPins[i], OUTPUT);
+    digitalWrite(colPins[i], LOW);
+    digitalWrite(rowPins[i], HIGH);
+  }
+
+  // set up button & interrupt
+  pinMode(BTN_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BTN_PIN), buttonISR, CHANGE);
+
+  // serial for input
+  Serial.begin(115200);
+  while (!Serial);
+
+  Serial.println("Enter text to scroll, then press [ENTER]:");
+}
+
+void loop() {
+  // wait for user to type a line
+  if (message.length() == 0) {
+    if (Serial.available()) {
+      message = Serial.readStringUntil('\n');
+      message.trim();
+      totalWidth   = message.length() * 8;
+      scrollOffset = 0;
+      Serial.print("→ scrolling: ");
+      Serial.println(message);
+    }
+    return;
+  }
+
+  // draw one 8×8 frame
+  drawFrame();
+
+  // advance the scrollOffset
+  scrollOffset += dirLR ? +1 : -1;
+  // wrap around (8px of blank at end)
+  if (scrollOffset > totalWidth + 8) scrollOffset = 0;
+  if (scrollOffset < 0)              scrollOffset = totalWidth + 8;
+
+  delay(speedMs);
+}
